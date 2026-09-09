@@ -17,8 +17,8 @@ use transport::Arrived;
 use transport::error::{Result, protocol_error};
 use transport::socket;
 
-use crate::percent::decode;
-use crate::wire::{self, Request, Response};
+use http::message::{self, Request, Response};
+use http::percent::decode;
 
 /// What the client did, as [`Session::serve_one`] reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,10 +80,10 @@ impl Session {
     pub fn serve_one(&mut self, listener: &TcpListener) -> Result<Event> {
         let (stream, _) = socket::accept_tcp(listener, self.timeout)?;
         let (mut reader, mut writer) = socket::split(stream)?;
-        let request = wire::read_request(&mut reader)?
+        let request = message::read_request(&mut reader)?
             .ok_or_else(|| protocol_error("a connection that sent no request"))?;
         let (event, response) = self.answer(&request);
-        wire::write_response(&mut writer, &response)?;
+        message::write_response(&mut writer, &response)?;
         Ok(event)
     }
 

@@ -13,12 +13,12 @@
 //! outside: a Location is configured with it.
 //!
 //! ```text
-//! endpoint.rs  the endpoint, and a connection to it, TLS or plain
-//! percent.rs   percent-encoding an object name or a prefix
-//! wire.rs      HTTP/1.1 on a socket, both sides
 //! client.rs    Xmip's side: list, get, put, delete, JSON read by serde
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
+//!
+//! The endpoint, the percent-encoding and HTTP itself come from the http
+//! technology, the flat XML scan from the capability (ADR-0044).
 //!
 //! Cloud Storage has objects and a precondition this transport does not
 //! yet use, so [`Transport::claims`] answers [`NoNativeClaim`], ADR-0024
@@ -30,10 +30,7 @@
 //! alone in this transport's bucket.
 
 pub mod client;
-pub mod endpoint;
-pub mod percent;
 pub mod session;
-pub mod wire;
 
 use std::time::Duration;
 
