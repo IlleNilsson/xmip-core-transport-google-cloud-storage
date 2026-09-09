@@ -11,9 +11,9 @@ use std::time::Duration;
 use serde_json::Value;
 use transport::error::{Result, TransportError, protocol_error};
 
-use crate::endpoint;
-use crate::percent::encode;
-use crate::wire::{self, Request, Response};
+use http::endpoint;
+use http::message::{self, Request, Response};
+use http::percent::encode;
 
 pub struct Client {
     endpoint: String,
@@ -104,7 +104,7 @@ impl Client {
             .header("Host", &self.host)
             .header("Authorization", &format!("Bearer {}", self.token));
         let stream = endpoint::connect(&self.endpoint, self.timeout)?;
-        judge(wire::exchange(stream, &request)?)
+        judge(message::exchange(stream, &request)?)
     }
 }
 
