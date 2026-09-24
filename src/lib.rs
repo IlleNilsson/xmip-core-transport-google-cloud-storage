@@ -17,9 +17,9 @@
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
 //!
-//! The endpoint, the percent-encoding, HTTP itself and the judgement of an
-//! answer come from the http technology, the flat XML scan from the
-//! capability (ADR-0044).
+//! The endpoint, HTTP itself and the judgement of an answer come from the
+//! http technology, the percent-encoding from `net`, the flat XML scan from
+//! the capability (ADR-0044).
 //!
 //! Cloud Storage has objects and a precondition this transport does not
 //! yet use, so [`Transport::claims`] answers [`NoNativeClaim`], ADR-0024
@@ -40,6 +40,7 @@ pub use client::Client;
 use http::endpoint;
 pub use session::{Event, Session};
 use transport::error::{Result, protocol_error};
+use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, NoNativeClaim, ResourceClaim, Transport};
@@ -167,46 +168,24 @@ impl GcsTransport {
     }
 }
 
-/// A bound session waiting for its one upload. The JSON API opens a
-/// connection per call, so the session serves one request at a time until
-/// one stored.
-struct Serving {
-    session: Session,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Serving {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        let Self {
-            mut session,
-            listener,
-            ..
-        } = *self;
-        loop {
-            match session.serve_one(&listener)? {
-                Event::Stored(arrived) => return Ok(arrived),
-                Event::Refused(reason) => {
-                    return Err(protocol_error(format!("the session refused: {reason}")));
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 impl Loopback for GcsTransport {
+    /// A bound session waiting for its one upload. The JSON API opens a
+    /// connection per call, so the session serves one request at a time
+    /// until one stored.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = socket::bind_tcp(&endpoint::authority(&self.endpoint)?)?;
-        Ok(Box::new(Serving {
-            session: self.session(),
-            listener,
-            address,
-        }))
+        let mut session = self.session();
+        Ok(Box::new(Listening::new(
+            move |listener: &TcpListener| loop {
+                match session.serve_one(listener)? {
+                    Event::Stored(arrived) => return Ok(arrived),
+                    Event::Refused(reason) => {
+                        return Err(protocol_error(format!("the session refused: {reason}")));
+                    }
+                    _ => {}
+                }
+            },
+            socket::bind_tcp(&endpoint::authority(&self.endpoint)?)?,
+        )))
     }
 
     /// Upload the payload as one object, from a fresh near end presenting
