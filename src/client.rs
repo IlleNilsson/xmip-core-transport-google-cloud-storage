@@ -12,12 +12,13 @@ use serde_json::Value;
 use transport::error::{Result, protocol_error};
 
 use http::endpoint;
-use http::message::{self, Request, Response};
+use http::status;
+use net::Endpoint;
+use net::http::{Request, Response};
 use net::percent::encode;
 
 pub struct Client {
-    endpoint: String,
-    host: String,
+    endpoint: Endpoint,
     token: String,
     timeout: Option<Duration>,
 }
@@ -30,8 +31,7 @@ impl Client {
     /// Where `endpoint` is not an HTTP URL.
     pub fn new(endpoint: &str, token: &str) -> Result<Self> {
         Ok(Self {
-            endpoint: endpoint.to_string(),
-            host: endpoint::authority(endpoint)?,
+            endpoint: Endpoint::parse(endpoint)?,
             token: token.to_string(),
             timeout: None,
         })
@@ -101,10 +101,10 @@ impl Client {
 
     fn call(&self, request: Request) -> Result<Response> {
         let request = request
-            .header("Host", &self.host)
+            .header("Host", &self.endpoint.authority())
             .header("Authorization", &format!("Bearer {}", self.token));
         let stream = endpoint::connect(&self.endpoint, self.timeout)?;
-        judge(message::exchange(stream, &request)?)
+        judge(net::http::exchange(stream, &request)?)
     }
 }
 
@@ -120,7 +120,7 @@ fn object(bucket: &str, name: &str) -> String {
 /// the message the service put in the body, retryable where HTTP says come
 /// back.
 fn judge(response: Response) -> Result<Response> {
-    message::judge("Cloud Storage", response, reason, |_| false)
+    status::judge("Cloud Storage", response, reason, |_| false)
 }
 
 /// The message an error answer carries, or nothing.

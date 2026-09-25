@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use transport::Arrived;
 use transport::error::Result;
 
-use http::message::{Request, Response};
 use http::server;
+use net::http::{Request, Response};
 use net::percent::decode;
 
 /// What the client did, as [`Session::serve_one`] reports it.
