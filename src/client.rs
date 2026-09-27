@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 use transport::error::{Result, protocol_error};
 
-use http::endpoint;
+use http::endpoint::{Connections, Offer};
 use http::status;
 use net::Endpoint;
 use net::http::{Request, Response};
@@ -21,6 +21,9 @@ pub struct Client {
     endpoint: Endpoint,
     token: String,
     timeout: Option<Duration>,
+    /// The connections kept to the service, shared with the transport
+    /// that made this client.
+    connections: Connections,
 }
 
 impl Client {
@@ -34,6 +37,7 @@ impl Client {
             endpoint: Endpoint::parse(endpoint)?,
             token: token.to_string(),
             timeout: None,
+            connections: Connections::new(),
         })
     }
 
@@ -41,6 +45,14 @@ impl Client {
     #[must_use]
     pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Keep connections among `connections`, which the transport holds
+    /// across every client it makes.
+    #[must_use]
+    pub fn sharing(mut self, connections: Connections) -> Self {
+        self.connections = connections;
         self
     }
 
@@ -103,8 +115,10 @@ impl Client {
         let request = request
             .header("Host", &self.endpoint.authority())
             .header("Authorization", &format!("Bearer {}", self.token));
-        let stream = endpoint::connect(&self.endpoint, self.timeout)?;
-        judge(net::http::exchange(stream, &request)?)
+        let answer =
+            self.connections
+                .exchange(&self.endpoint, self.timeout, Offer::Http11, &request)?;
+        judge(answer)
     }
 }
 

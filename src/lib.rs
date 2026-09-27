@@ -37,6 +37,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 pub use client::Client;
+use http::endpoint::Connections;
 use net::Endpoint;
 pub use session::{Event, Session};
 use transport::error::{Result, protocol_error};
@@ -59,6 +60,9 @@ pub struct GcsTransport {
     token: String,
     prefix: String,
     timeout: Option<Duration>,
+    /// The connections kept to the service, shared by every client this
+    /// makes.
+    connections: Connections,
 }
 
 impl GcsTransport {
@@ -73,6 +77,7 @@ impl GcsTransport {
             token: String::new(),
             prefix: String::new(),
             timeout: None,
+            connections: Connections::new(),
         }
     }
 
@@ -103,6 +108,7 @@ impl GcsTransport {
     /// Where the endpoint is not an HTTP URL.
     pub fn client(&self) -> Result<Client> {
         let client = Client::new(&self.endpoint, &self.token)?;
+        let client = client.sharing(self.connections.clone());
         Ok(match self.timeout {
             Some(timeout) => client.timing_out_after(timeout),
             None => client,
