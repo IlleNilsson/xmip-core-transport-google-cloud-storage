@@ -43,7 +43,8 @@ use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, NoNativeClaim, ResourceClaim, Transport};
+use transport::{Arrived, Configured, Directions, NoNativeClaim, ResourceClaim, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 /// What the loopback pair agrees on: one bucket, one object uploaded
 /// there, one bearer token the far end expects and the near end presents.
@@ -157,6 +158,52 @@ impl Transport for GcsTransport {
     }
 }
 
+impl Configured for GcsTransport {
+    /// The address is the JSON API's endpoint, `https://storage.googleapis.com`
+    /// in the cloud.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "bucket",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The bucket a Location lists and gets from or uploads to.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "prefix",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "Only the objects whose names start with it are received; every \
+                          object when left out.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long an endpoint that stops answering is waited on; unbounded \
+                          when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    /// The bearer token comes through the Location's credentials, never a
+    /// setting; the transport is built without it.
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let mut transport = Self::new(address, settings.text("bucket"));
+        if let Some(prefix) = settings.optional_text("prefix") {
+            transport = transport.with_prefix(prefix);
+        }
+        if let Some(timeout) = settings.optional_duration("timeout") {
+            transport = transport.timing_out_after(timeout);
+        }
+        Ok(transport)
+    }
+}
+
 impl GcsTransport {
     /// Both ends on this machine: an ephemeral local port, one token the
     /// far end expects and the near end presents, the loopback timeout.
@@ -203,6 +250,39 @@ impl Loopback for GcsTransport {
 mod tests {
     use super::*;
     use std::thread::JoinHandle;
+    use xcore::settings::Given;
+
+    #[test]
+    fn google_cloud_storage_declares_its_settings_and_reads_through_them() {
+        assert_eq!(GcsTransport::SETTINGS.problems(), Vec::<String>::new());
+        let endpoint = "https://storage.googleapis.com";
+        let given = [
+            ("bucket".to_string(), Given::Text("orders".to_string())),
+            ("prefix".to_string(), Given::Text("in/".to_string())),
+            ("timeout".to_string(), Given::Text("10s".to_string())),
+        ];
+        let built = GcsTransport::open(endpoint, Applies::Receive, &given).expect("built");
+        assert_eq!(built.bucket, "orders");
+        assert_eq!(built.prefix, "in/");
+        assert_eq!(built.timeout, Some(Duration::from_secs(10)));
+        assert!(
+            built.token.is_empty(),
+            "the token is the Location's credentials"
+        );
+        let Err(refused) = GcsTransport::open(endpoint, Applies::Send, &given[1..2]) else {
+            panic!("bucket is required, and a Send Location has no prefix");
+        };
+        assert!(
+            refused.message.contains("\"bucket\""),
+            "{}",
+            refused.message
+        );
+        assert!(
+            refused.message.contains("\"prefix\""),
+            "{}",
+            refused.message
+        );
+    }
 
     fn node(endpoint: &str, token: &str) -> GcsTransport {
         GcsTransport::new(endpoint, "orders")
