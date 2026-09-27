@@ -218,17 +218,17 @@ mod tests {
             .body(b"x");
         let (event, response) = session.answer(&bearing(upload));
         assert_eq!(response.status, 200);
-        assert!(response.text().contains(r#""name":"in/k""#));
+        assert!(response.text().expect("text").contains(r#""name":"in/k""#));
         assert_eq!(
             event,
             Event::Stored(Arrived::new("gs://b/in/k", b"x".to_vec()))
         );
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "in/");
         let (_, response) = session.answer(&bearing(listing));
-        assert!(response.text().contains(r#""items":[{"#));
+        assert!(response.text().expect("text").contains(r#""items":[{"#));
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "z");
         let (_, response) = session.answer(&bearing(listing));
-        assert!(!response.text().contains("items"));
+        assert!(!response.text().expect("text").contains("items"));
         let media = Request::new("GET", "/storage/v1/b/b/o/in%2Fk").query("alt", "media");
         let (event, response) = session.answer(&bearing(media));
         assert_eq!(
@@ -247,7 +247,12 @@ mod tests {
         let (event, response) = session.answer(&wrong);
         assert_eq!(event, Event::Refused("authError".to_string()));
         assert_eq!(response.status, 401);
-        assert!(response.text().contains("Invalid Credentials"));
+        assert!(
+            response
+                .text()
+                .expect("text")
+                .contains("Invalid Credentials")
+        );
         let (_, response) = session.answer(&bearing(Request::new("GET", "/elsewhere")));
         assert_eq!(response.status, 404);
         let (_, response) = session.answer(&bearing(Request::new("PUT", "/storage/v1/b/b/o/k")));
