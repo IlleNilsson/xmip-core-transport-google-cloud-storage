@@ -38,7 +38,7 @@ use std::time::Duration;
 
 pub use client::Client;
 use http::endpoint::Connections;
-use net::Endpoint;
+use net::{Endpoint, Target};
 pub use session::{Event, Session};
 use transport::error::{Result, protocol_error};
 use transport::listening::Listening;
@@ -129,7 +129,9 @@ impl GcsTransport {
     /// Where a target names the bucket and object itself — `gs://bucket/name`
     /// — or is a name alone in this transport's bucket.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        socket::target("gs", target).unwrap_or((&self.bucket, target))
+        Target::under(&["gs"], target).map_or((&self.bucket, target), |named| {
+            (named.authority(), named.path())
+        })
     }
 }
 
