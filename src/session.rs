@@ -13,7 +13,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use transport::Arrived;
+use transport::Taken;
 use transport::error::Result;
 
 use http::server;
@@ -28,7 +28,7 @@ pub enum Event {
     /// The client fetched this object.
     Retrieved(String),
     /// The client uploaded an object; here is the Stream.
-    Stored(Arrived),
+    Stored(Taken),
     /// The client deleted this object.
     Deleted(String),
     /// The client was answered with this error reason.
@@ -155,7 +155,7 @@ impl Session {
         self.objects
             .insert(format!("{bucket}/{name}"), request.body.clone());
         (
-            Event::Stored(Arrived::new(origin(bucket, name), request.body.clone())),
+            Event::Stored(Taken::new(origin(bucket, name), request.body.clone())),
             answer(200, &resource(bucket, name, request.body.len())),
         )
     }
@@ -222,7 +222,7 @@ mod tests {
         assert!(response.text().expect("text").contains(r#""name":"in/k""#));
         assert_eq!(
             event,
-            Event::Stored(Arrived::new("gs://b/in/k", b"x".to_vec()))
+            Event::Stored(Taken::new("gs://b/in/k", b"x".to_vec()))
         );
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "in/");
         let (_, response) = session.answer(&bearing(listing));
