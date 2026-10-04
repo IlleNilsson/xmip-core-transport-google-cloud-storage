@@ -38,6 +38,11 @@ pub enum Event {
 pub struct Session {
     token: String,
     objects: BTreeMap<String, Vec<u8>>,
+    /// Each object's generation: the count of writes this session had made
+    /// when it was written, so one written again has a new one, and a new
+    /// `etag` with it.
+    generations: BTreeMap<String, u64>,
+    writes: u64,
     timeout: Option<Duration>,
 }
 
@@ -48,6 +53,8 @@ impl Session {
         Self {
             token: token.to_string(),
             objects: BTreeMap::new(),
+            generations: BTreeMap::new(),
+            writes: 0,
             timeout: None,
         }
     }
@@ -62,7 +69,9 @@ impl Session {
     /// Hold these objects, keyed `bucket/name`.
     #[must_use]
     pub fn with_objects(mut self, objects: BTreeMap<String, Vec<u8>>) -> Self {
-        self.objects = objects;
+        for (held, bytes) in objects {
+            self.write(held, bytes);
+        }
         self
     }
 
@@ -118,7 +127,10 @@ impl Session {
             .objects
             .iter()
             .filter(|(held, _)| held.starts_with(&under))
-            .map(|(held, bytes)| resource(bucket, &held[bucket.len() + 1..], bytes.len()))
+            .map(|(held, bytes)| {
+                let written = self.generations.get(held).copied().unwrap_or_default();
+                resource(bucket, &held[bucket.len() + 1..], bytes.len(), written)
+            })
             .collect();
         let mut listing = json!({ "kind": "storage#objects" });
         if !items.is_empty() {
@@ -152,16 +164,25 @@ impl Session {
         let Some(name) = request.query_value("name") else {
             return refused(400, "required", "Required parameter: name");
         };
-        self.objects
-            .insert(format!("{bucket}/{name}"), request.body.clone());
+        let written = self.write(format!("{bucket}/{name}"), request.body.clone());
         (
             Event::Stored(Taken::new(origin(bucket, name), request.body.clone())),
-            answer(200, &resource(bucket, name, request.body.len())),
+            answer(200, &resource(bucket, name, request.body.len(), written)),
         )
     }
 
+    /// Hold `bytes` as `held` in a new generation, and say which.
+    fn write(&mut self, held: String, bytes: Vec<u8>) -> u64 {
+        self.writes += 1;
+        self.generations.insert(held.clone(), self.writes);
+        self.objects.insert(held, bytes);
+        self.writes
+    }
+
     fn delete(&mut self, bucket: &str, name: &str) -> (Event, Response) {
-        match self.objects.remove(&format!("{bucket}/{name}")) {
+        let held = format!("{bucket}/{name}");
+        self.generations.remove(&held);
+        match self.objects.remove(&held) {
             Some(_) => (Event::Deleted(origin(bucket, name)), Response::new(204)),
             None => refused(404, "notFound", &format!("No such object: {bucket}/{name}")),
         }
@@ -172,14 +193,17 @@ fn origin(bucket: &str, name: &str) -> String {
     format!("gs://{bucket}/{name}")
 }
 
-/// An object resource, as much of it as a listing or an upload answer
-/// needs.
-fn resource(bucket: &str, name: &str, size: usize) -> Value {
+/// An object resource of the `written`th write, as much of it as a listing
+/// or an upload answer needs: its generation, and its `etag`, which a new
+/// generation changes.
+fn resource(bucket: &str, name: &str, size: usize, written: u64) -> Value {
     json!({
         "kind": "storage#object",
         "name": name,
         "bucket": bucket,
         "size": size.to_string(),
+        "generation": written.to_string(),
+        "etag": written.to_string(),
     })
 }
 
@@ -220,13 +244,24 @@ mod tests {
         let (event, response) = session.answer(&bearing(upload));
         assert_eq!(response.status, 200);
         assert!(response.text().expect("text").contains(r#""name":"in/k""#));
+        assert!(response.text().expect("text").contains(r#""etag":"1""#));
         assert_eq!(
             event,
             Event::Stored(Taken::new("gs://b/in/k", b"x".to_vec()))
         );
+        let again = Request::new("POST", "/upload/storage/v1/b/b/o")
+            .query("uploadType", "media")
+            .query("name", "in/k")
+            .body(b"x");
+        let (_, response) = session.answer(&bearing(again));
+        assert!(
+            response.text().expect("text").contains(r#""etag":"2""#),
+            "written again"
+        );
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "in/");
         let (_, response) = session.answer(&bearing(listing));
         assert!(response.text().expect("text").contains(r#""items":[{"#));
+        assert!(response.text().expect("text").contains(r#""etag":"2""#));
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "z");
         let (_, response) = session.answer(&bearing(listing));
         assert!(!response.text().expect("text").contains("items"));
