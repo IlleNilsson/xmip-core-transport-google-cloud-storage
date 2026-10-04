@@ -56,26 +56,31 @@ impl Client {
         self
     }
 
-    /// The object names under `prefix` in `bucket`, as many as one listing
-    /// carries — a thousand — so a fuller prefix is taken a thousand at a
-    /// time.
+    /// The object names under `prefix` in `bucket`, each with its `etag`,
+    /// as many as one listing carries — a thousand — so a fuller prefix is
+    /// taken a thousand at a time.
     ///
     /// # Errors
     /// Where the endpoint refused, could not be reached, or did not answer
-    /// with a listing.
-    pub fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+    /// with a listing naming each object's `etag`.
+    pub fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<(String, String)>> {
         let request = Request::new("GET", objects(bucket)).query("prefix", prefix);
         let listing: Value = serde_json::from_slice(&self.call(request)?.body)
             .map_err(|e| protocol_error(format!("a listing that is not JSON: {e}")))?;
-        Ok(listing["items"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item["name"].as_str().map(str::to_string))
-                    .collect()
+        let Some(items) = listing["items"].as_array() else {
+            return Ok(Vec::new());
+        };
+        items
+            .iter()
+            .map(|item| {
+                let named = |field: &str| {
+                    item[field].as_str().map(str::to_string).ok_or_else(|| {
+                        protocol_error(format!("a listed object without its {field}"))
+                    })
+                };
+                Ok((named("name")?, named("etag")?))
             })
-            .unwrap_or_default())
+            .collect()
     }
 
     /// The object `name` in `bucket`.
@@ -168,7 +173,8 @@ mod tests {
         client.put("orders", "out/c.edi", b"UNB").expect("put");
         assert_eq!(
             client.list("orders", "in/").expect("list"),
-            vec!["in/a b.edi".to_string()]
+            vec![("in/a b.edi".to_string(), "1".to_string())],
+            "the first object written"
         );
         assert_eq!(client.get("orders", "in/a b.edi").expect("get"), b"UNA");
         client.delete("orders", "in/a b.edi").expect("delete");
