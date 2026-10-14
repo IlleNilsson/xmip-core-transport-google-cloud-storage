@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(again.len(), 1, "the failed one, not the refused one");
         let again = again.into_iter().next().expect("one").taken().expect("ok");
         assert_eq!(again.origin_uri, "gs://orders/in/2.edi");
-        assert!(again.bytes.is_empty());
+        assert_eq!(again.bytes, [] as [u8; 0]);
         let left = near
             .client()
             .expect("client")
