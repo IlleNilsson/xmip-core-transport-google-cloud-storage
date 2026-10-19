@@ -173,7 +173,7 @@ impl Transport for GcsTransport {
     /// process's, so a node started again receives it once more. On
     /// [`transport::Verdict::Failed`] it is left for the next receive to
     /// list and get again.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         let client = Arc::new(self.client()?);
         let (getting, deleting) = (Arc::clone(&client), Arc::clone(&client));
         let (bucket, getting_from, deleting_from) = (
@@ -183,6 +183,7 @@ impl Transport for GcsTransport {
         );
         listed(
             || client.list(bucket, &self.prefix),
+            most,
             &self.refused,
             |name| format!("gs://{bucket}/{name}"),
             move |name| getting.get(&getting_from, name),
@@ -190,7 +191,14 @@ impl Transport for GcsTransport {
         )
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered(
+            "the HTTP client writes a request whole, its length counted from it",
+        )
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         let (bucket, name) = self.resolve(target);
         self.client()?.put(bucket, name, bytes)
     }
