@@ -3,7 +3,7 @@
 //! Streams that arrive as objects in a Cloud Storage bucket. One object is
 //! one Stream, its name kept beside it.
 //!
-//! Cloud Storage is the drop box of every organisation that lives in
+//! Cloud Storage is the drop box of every organization that lives in
 //! Google Cloud, and its JSON API is four calls on a bucket: list under a
 //! prefix, get as media, upload as media, delete. A Receive Location lists
 //! a prefix, gets each object as the runtime first reads it, and deletes it
@@ -20,7 +20,7 @@
 //! session.rs   the far end a test or the playground runs on loopback
 //! ```
 //!
-//! The endpoint, HTTP itself and the judgement of an answer come from the
+//! The endpoint, HTTP itself and the judgment of an answer come from the
 //! http technology, the percent-encoding from `net`, the flat XML scan from
 //! the capability (ADR-0044).
 //!
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn objects_are_artefacts_without_a_lock_and_an_unreachable_endpoint_is_retryable() {
+    fn objects_are_artifacts_without_a_lock_and_an_unreachable_endpoint_is_retryable() {
         let near = node("http://127.0.0.1:1", "t");
         assert!(near.claims().is_some());
         assert_eq!(near.name(), "google-cloud-storage");
