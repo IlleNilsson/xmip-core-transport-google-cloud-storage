@@ -11,11 +11,11 @@ use std::time::Duration;
 use serde_json::Value;
 use transport::error::{Result, protocol_error};
 
+use codec::percent::encode;
 use http::endpoint::{Connections, Offer};
 use http::status;
 use net::Endpoint;
 use net::http::{Request, Response};
-use net::percent::encode;
 
 pub struct Client {
     endpoint: Endpoint,
