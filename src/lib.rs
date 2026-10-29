@@ -139,7 +139,7 @@ impl GcsTransport {
     /// Where a target names the bucket and object itself — `gs://bucket/name`
     /// — or is a name alone in this transport's bucket.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        Target::under(&["gs"], target).map_or((&self.bucket, target), |named| {
+        Target::under(Self::SCHEMES, target).map_or((&self.bucket, target), |named| {
             (named.authority(), named.path())
         })
     }
@@ -239,6 +239,9 @@ impl Configured for GcsTransport {
             },
         ],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["gs"];
 
     /// The bearer token comes through the Location's credentials, never a
     /// setting; the transport is built without it.
