@@ -1,5 +1,5 @@
 //! The far end: enough of the JSON API to answer one Location, and what a
-//! test or the playground puts on loopback.
+//! test or the essentials puts on loopback.
 //!
 //! Not Cloud Storage. One session holds objects in memory, checks every
 //! request for one bearer token, and answers the four calls with the
