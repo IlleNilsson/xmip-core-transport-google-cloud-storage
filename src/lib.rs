@@ -308,6 +308,7 @@ impl Loopback for GcsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
     use std::thread::JoinHandle;
     use transport::Taken;
     use xcore::settings::Given;
@@ -411,7 +412,7 @@ mod tests {
             Event::Stored(Taken::new("gs://orders/in/1.edi", b"UNA:+.? '".to_vec()))
         );
         let named = |name: &str| format!("gs://orders/in/{name}");
-        assert!(matches!(events[3], Event::Listed { .. }));
+        assert_matches!(events[3], Event::Listed { .. });
         assert_eq!(
             events[4..6],
             [
@@ -420,7 +421,7 @@ mod tests {
             ],
             "only what was read was got, only what was accepted deleted"
         );
-        assert!(matches!(events[6], Event::Listed { .. }));
+        assert_matches!(events[6], Event::Listed { .. });
         assert_eq!(
             events[7..9],
             [
@@ -428,7 +429,7 @@ mod tests {
                 Event::Deleted(named("2.edi"))
             ]
         );
-        assert!(matches!(events[9], Event::Listed { .. }));
+        assert_matches!(events[9], Event::Listed { .. });
     }
 
     #[test]
