@@ -105,13 +105,6 @@ impl GcsTransport {
         self
     }
 
-    /// Give up on an endpoint that stops answering after `timeout`.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// The client this transport speaks through.
     ///
     /// # Errors
@@ -229,19 +222,21 @@ impl Configured for GcsTransport {
                           object when left out.",
                 applies: Applies::Receive,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long an endpoint that stops answering is waited on; unbounded \
-                          when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long an endpoint that stops answering is waited on; unbounded \
+                 when left out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["gs"];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     /// The bearer token comes through the Location's credentials, never a
     /// setting; the transport is built without it.
@@ -249,9 +244,6 @@ impl Configured for GcsTransport {
         let mut transport = Self::new(address, settings.text("bucket"));
         if let Some(prefix) = settings.optional_text("prefix") {
             transport = transport.with_prefix(prefix);
-        }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
     }
