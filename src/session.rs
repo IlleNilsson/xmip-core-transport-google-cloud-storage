@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use transport::Taken;
 use transport::error::Result;
 
+use crate::origin;
 use codec::percent::decode;
 use http::server;
 use net::http::{Request, Response};
@@ -194,10 +195,6 @@ impl Session {
     }
 }
 
-fn origin(bucket: &str, name: &str) -> String {
-    format!("gs://{bucket}/{name}")
-}
-
 /// An object resource of the `written`th write, as much of it as a listing
 /// or an upload answer needs: its generation, and its `etag`, which a new
 /// generation changes.
@@ -252,7 +249,7 @@ mod tests {
         assert!(response.text().expect("text").contains(r#""etag":"1""#));
         assert_eq!(
             event,
-            Event::Stored(Taken::new("gs://b/in/k", b"x".to_vec()))
+            Event::Stored(Taken::new("google-cloud-storage://b/in/k", b"x".to_vec()))
         );
         let again = Request::new("POST", "/upload/storage/v1/b/b/o")
             .query("uploadType", "media")
@@ -274,13 +271,19 @@ mod tests {
         let (event, response) = session.answer(&bearing(media));
         assert_eq!(
             (event, response.body),
-            (Event::Retrieved("gs://b/in/k".to_string()), b"x".to_vec())
+            (
+                Event::Retrieved("google-cloud-storage://b/in/k".to_string()),
+                b"x".to_vec()
+            )
         );
         let (event, response) =
             session.answer(&bearing(Request::new("DELETE", "/storage/v1/b/b/o/in%2Fk")));
         assert_eq!(
             (event, response.status),
-            (Event::Deleted("gs://b/in/k".to_string()), 204)
+            (
+                Event::Deleted("google-cloud-storage://b/in/k".to_string()),
+                204
+            )
         );
         assert!(session.objects().is_empty());
         let wrong =

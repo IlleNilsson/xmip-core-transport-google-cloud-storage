@@ -29,9 +29,9 @@
 //! clause 5. The native claim the record names — a generation precondition
 //! — is a later step.
 //!
-//! The origin URI is the object in the protocol's own terms:
-//! `gs://bucket/in/order-1.edi`. A send target is the same form, or a name
-//! alone in this transport's bucket.
+//! The origin URI is the object under the scheme that is the technology's
+//! name: `google-cloud-storage://bucket/in/order-1.edi`. A send target is
+//! the same form, or a name alone in this transport's bucket.
 
 pub mod client;
 pub mod session;
@@ -129,8 +129,9 @@ impl GcsTransport {
         }
     }
 
-    /// Where a target names the bucket and object itself — `gs://bucket/name`
-    /// — or is a name alone in this transport's bucket.
+    /// Where a target names the bucket and object itself —
+    /// `google-cloud-storage://bucket/name` — or is a name alone in this
+    /// transport's bucket.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
         Target::under(Self::SCHEMES, target).map_or((&self.bucket, target), |named| {
             (named.authority(), named.path())
@@ -178,7 +179,7 @@ impl Transport for GcsTransport {
             || client.list(bucket, &self.prefix),
             most,
             &self.refused,
-            |name| format!("gs://{bucket}/{name}"),
+            |name| origin(bucket, name),
             move |name| getting.get(&getting_from, name),
             move |name| deleting.delete(&deleting_from, name),
         )
@@ -231,8 +232,9 @@ impl Configured for GcsTransport {
         ],
     };
 
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["gs"];
+    /// The schemes a Location's address is entered with to choose this
+    /// technology: its name (ADR-0011, amendment 2026-11-19).
+    const SCHEMES: &'static [&'static str] = &["google-cloud-storage"];
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -254,6 +256,15 @@ impl Configured for GcsTransport {
         self.connections = self.connections.timed_by(clock);
         self
     }
+}
+
+/// The object `name` in `bucket`, as an origin says it, under the scheme
+/// above: `google-cloud-storage://bucket/name`. The one place the form is
+/// written: the transport's receive, the session's answers and the
+/// google-cloud-storage archive's receipt all name an object by it.
+#[must_use]
+pub fn origin(bucket: &str, name: &str) -> String {
+    format!("google-cloud-storage://{bucket}/{name}")
 }
 
 impl GcsTransport {
@@ -372,7 +383,7 @@ mod tests {
         // get, a delete; a list to see what is left.
         let far_end = serve(near.session(), listener, 10);
         near.send("in/1.edi", b"UNA:+.? '").expect("a name alone");
-        near.send("gs://orders/in/2.edi", b"")
+        near.send("google-cloud-storage://orders/in/2.edi", b"")
             .expect("a full target");
         near.send("in/3.edi", b"third").expect("a name alone");
         let mut arrived = near.receive().expect("received");
@@ -381,9 +392,9 @@ mod tests {
         assert!(arrived.iter().all(Arrived::defers));
         let third = arrived.pop().expect("third");
         let second = arrived.pop().expect("second");
-        assert_eq!(second.origin_uri, "gs://orders/in/2.edi");
+        assert_eq!(second.origin_uri, "google-cloud-storage://orders/in/2.edi");
         let first = arrived.pop().expect("first").taken().expect("accepted");
-        assert_eq!(first.origin_uri, "gs://orders/in/1.edi");
+        assert_eq!(first.origin_uri, "google-cloud-storage://orders/in/1.edi");
         assert_eq!(first.bytes, b"UNA:+.? '");
         second.failed().expect("left");
         third
@@ -392,7 +403,7 @@ mod tests {
         let again = near.receive().expect("received again");
         assert_eq!(again.len(), 1, "the failed one, not the refused one");
         let again = again.into_iter().next().expect("one").taken().expect("ok");
-        assert_eq!(again.origin_uri, "gs://orders/in/2.edi");
+        assert_eq!(again.origin_uri, "google-cloud-storage://orders/in/2.edi");
         assert_eq!(again.bytes, [] as [u8; 0]);
         let left = near
             .client()
@@ -408,9 +419,12 @@ mod tests {
         assert_eq!(session.objects().len(), 1, "only the refused one is held");
         assert_eq!(
             events[0],
-            Event::Stored(Taken::new("gs://orders/in/1.edi", b"UNA:+.? '".to_vec()))
+            Event::Stored(Taken::new(
+                "google-cloud-storage://orders/in/1.edi",
+                b"UNA:+.? '".to_vec()
+            ))
         );
-        let named = |name: &str| format!("gs://orders/in/{name}");
+        let named = |name: &str| format!("google-cloud-storage://orders/in/{name}");
         assert_matches!(events[3], Event::Listed { .. });
         assert_eq!(
             events[4..6],
@@ -489,7 +503,7 @@ mod tests {
         let pair = GcsTransport::loopback();
         let arrived = pair.round(b"an upload").expect("round");
         assert_eq!(arrived.bytes, b"an upload");
-        assert_eq!(arrived.origin_uri, "gs://probe/probe.bin");
+        assert_eq!(arrived.origin_uri, "google-cloud-storage://probe/probe.bin");
         assert_eq!(pair.name(), "google-cloud-storage");
         assert_eq!(pair.ceiling(), None);
     }

@@ -185,7 +185,7 @@ mod tests {
         let (session, events) = far_end.join().expect("thread");
         assert_eq!(session.objects().len(), 1);
         assert_matches!(&events[2], Event::Listed { prefix, .. } if prefix == "in/");
-        let origin = "gs://orders/in/a b.edi".to_string();
+        let origin = "google-cloud-storage://orders/in/a b.edi".to_string();
         assert_eq!(events[3], Event::Retrieved(origin.clone()));
         assert_eq!(events[4], Event::Deleted(origin));
         assert_eq!(events[5], Event::Refused("notFound".to_string()));
