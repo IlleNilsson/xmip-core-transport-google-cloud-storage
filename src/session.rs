@@ -4,9 +4,12 @@
 //! Not Cloud Storage. One session holds objects in memory, checks every
 //! request for one bearer token, and answers the four calls with the
 //! shapes the API answers them — the object list, the media, the object
-//! resource, the error with its reason. A Location that needs durability,
-//! generations or a token it obtains itself talks to the service through
-//! [`crate::Client`].
+//! resource, the error with its reason. It honors `ifGenerationMatch` on
+//! each as the service does (*request preconditions*): a get or a delete
+//! of an object that is not there is `404 notFound`, and a condition that
+//! does not hold is `412 conditionNotMet`, `0` holding only where nothing
+//! is. A Location that needs durability or a token it obtains itself
+//! talks to the service through [`crate::Client`].
 
 use std::collections::BTreeMap;
 use std::net::TcpListener;
@@ -40,8 +43,7 @@ pub struct Session {
     token: String,
     objects: BTreeMap<String, Vec<u8>>,
     /// Each object's generation: the count of writes this session had made
-    /// when it was written, so one written again has a new one, and a new
-    /// `etag` with it.
+    /// when it was written, so one written again has a new one.
     generations: BTreeMap<String, u64>,
     writes: u64,
     timeout: Option<Duration>,
@@ -116,11 +118,20 @@ impl Session {
         };
         match (request.method.as_str(), upload, name) {
             ("GET", false, None) => self.list(&bucket, request),
-            ("GET", false, Some(name)) => self.get(&bucket, &name),
+            ("GET", false, Some(name)) => self.get(&bucket, &name, request),
             ("POST", true, None) => self.put(&bucket, request),
-            ("DELETE", false, Some(name)) => self.delete(&bucket, &name),
+            ("DELETE", false, Some(name)) => self.delete(&bucket, &name, request),
             _ => refused(405, "methodNotAllowed", "not one of the four calls"),
         }
+    }
+
+    /// Whether `request`'s `ifGenerationMatch`, where it carries one, names
+    /// the generation `held` lies in now: `0` where nothing does.
+    fn holds(&self, request: &Request, held: &str) -> bool {
+        let lying = self.generations.get(held).copied().unwrap_or_default();
+        request
+            .query_value("ifGenerationMatch")
+            .is_none_or(|wanted| wanted == lying.to_string())
     }
 
     fn list(&self, bucket: &str, request: &Request) -> (Event, Response) {
@@ -151,15 +162,17 @@ impl Session {
         )
     }
 
-    fn get(&self, bucket: &str, name: &str) -> (Event, Response) {
-        match self.objects.get(&format!("{bucket}/{name}")) {
+    fn get(&self, bucket: &str, name: &str, request: &Request) -> (Event, Response) {
+        let held = format!("{bucket}/{name}");
+        match self.objects.get(&held) {
+            None => refused(404, "notFound", &format!("No such object: {held}")),
+            Some(_) if !self.holds(request, &held) => not_met(),
             Some(bytes) => (
                 Event::Retrieved(origin(bucket, name)),
                 Response::new(200)
                     .header("Content-Type", "application/octet-stream")
                     .body(bytes),
             ),
-            None => refused(404, "notFound", &format!("No such object: {bucket}/{name}")),
         }
     }
 
@@ -170,6 +183,9 @@ impl Session {
         let Some(name) = request.query_value("name") else {
             return refused(400, "required", "Required parameter: name");
         };
+        if !self.holds(request, &format!("{bucket}/{name}")) {
+            return not_met();
+        }
         let written = self.write(format!("{bucket}/{name}"), request.body.clone());
         (
             Event::Stored(Taken::new(origin(bucket, name), request.body.clone())),
@@ -185,19 +201,24 @@ impl Session {
         self.writes
     }
 
-    fn delete(&mut self, bucket: &str, name: &str) -> (Event, Response) {
+    fn delete(&mut self, bucket: &str, name: &str, request: &Request) -> (Event, Response) {
         let held = format!("{bucket}/{name}");
-        self.generations.remove(&held);
-        match self.objects.remove(&held) {
-            Some(_) => (Event::Deleted(origin(bucket, name)), Response::new(204)),
-            None => refused(404, "notFound", &format!("No such object: {bucket}/{name}")),
+        if !self.objects.contains_key(&held) {
+            return refused(404, "notFound", &format!("No such object: {held}"));
         }
+        if !self.holds(request, &held) {
+            return not_met();
+        }
+        self.generations.remove(&held);
+        self.objects.remove(&held);
+        (Event::Deleted(origin(bucket, name)), Response::new(204))
     }
 }
 
 /// An object resource of the `written`th write, as much of it as a listing
-/// or an upload answer needs: its generation, and its `etag`, which a new
-/// generation changes.
+/// or an upload answer needs: its generation, and an `etag` as opaque as
+/// the service's and unlike the generation, so a client that read one for
+/// the other is caught.
 fn resource(bucket: &str, name: &str, size: usize, written: u64) -> Value {
     json!({
         "kind": "storage#object",
@@ -205,8 +226,17 @@ fn resource(bucket: &str, name: &str, size: usize, written: u64) -> Value {
         "bucket": bucket,
         "size": size.to_string(),
         "generation": written.to_string(),
-        "etag": written.to_string(),
+        "etag": format!("CK{written}EAE="),
     })
+}
+
+/// The service's answer to a condition that does not hold.
+fn not_met() -> (Event, Response) {
+    refused(
+        412,
+        "conditionNotMet",
+        "At least one of the pre-conditions you specified did not hold.",
+    )
 }
 
 fn answer(status: u16, body: &Value) -> Response {
@@ -246,7 +276,12 @@ mod tests {
         let (event, response) = session.answer(&bearing(upload));
         assert_eq!(response.status, 200);
         assert!(response.text().expect("text").contains(r#""name":"in/k""#));
-        assert!(response.text().expect("text").contains(r#""etag":"1""#));
+        assert!(
+            response
+                .text()
+                .expect("text")
+                .contains(r#""generation":"1""#)
+        );
         assert_eq!(
             event,
             Event::Stored(Taken::new("google-cloud-storage://b/in/k", b"x".to_vec()))
@@ -257,13 +292,27 @@ mod tests {
             .body(b"x");
         let (_, response) = session.answer(&bearing(again));
         assert!(
-            response.text().expect("text").contains(r#""etag":"2""#),
+            response
+                .text()
+                .expect("text")
+                .contains(r#""generation":"2""#),
             "written again"
         );
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "in/");
         let (_, response) = session.answer(&bearing(listing));
         assert!(response.text().expect("text").contains(r#""items":[{"#));
-        assert!(response.text().expect("text").contains(r#""etag":"2""#));
+        assert!(
+            response
+                .text()
+                .expect("text")
+                .contains(r#""generation":"2""#)
+        );
+        assert!(
+            response
+                .text()
+                .expect("text")
+                .contains(r#""etag":"CK2EAE=""#)
+        );
         let listing = Request::new("GET", "/storage/v1/b/b/o").query("prefix", "z");
         let (_, response) = session.answer(&bearing(listing));
         assert!(!response.text().expect("text").contains("items"));
@@ -304,5 +353,44 @@ mod tests {
         let bare = Request::new("POST", "/upload/storage/v1/b/b/o").query("uploadType", "media");
         let (_, response) = session.answer(&bearing(bare));
         assert_eq!(response.status, 400);
+    }
+
+    #[test]
+    fn a_session_honors_if_generation_match_on_every_call_as_the_service_does() {
+        let mut session =
+            Session::new("ya29.token").with_objects([("b/k".to_string(), b"x".to_vec())].into());
+        let upload = |generation: &str| {
+            Request::new("POST", "/upload/storage/v1/b/b/o")
+                .query("uploadType", "media")
+                .query("name", "k")
+                .query("ifGenerationMatch", generation)
+                .body(b"y")
+        };
+        let at = |method: &str, name: &str, generation: &str| {
+            Request::new(method, format!("/storage/v1/b/b/o/{name}"))
+                .query("ifGenerationMatch", generation)
+        };
+        let status = |session: &mut Session, request: Request| {
+            let (event, response) = session.answer(&bearing(request));
+            (response.status, event)
+        };
+        let not_met = (412, Event::Refused("conditionNotMet".to_string()));
+        let not_found = (404, Event::Refused("notFound".to_string()));
+        assert_eq!(status(&mut session, upload("0")), not_met, "one is there");
+        assert_eq!(status(&mut session, at("GET", "k", "2")), not_met);
+        assert_eq!(status(&mut session, at("GET", "k", "0")), not_met);
+        assert_eq!(status(&mut session, at("DELETE", "k", "2")), not_met);
+        assert_eq!(status(&mut session, at("GET", "none", "1")), not_found);
+        assert_eq!(status(&mut session, at("DELETE", "none", "1")), not_found);
+        assert_eq!(status(&mut session, at("GET", "k", "1")).0, 200);
+        assert_eq!(
+            status(&mut session, upload("1")).0,
+            200,
+            "over generation 1"
+        );
+        assert_eq!(session.objects().get("b/k"), Some(&b"y".to_vec()));
+        assert_eq!(status(&mut session, at("DELETE", "k", "1")), not_met);
+        assert_eq!(status(&mut session, at("DELETE", "k", "2")).0, 204);
+        assert_eq!(status(&mut session, upload("0")).0, 200, "none is there");
     }
 }

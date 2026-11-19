@@ -1,15 +1,28 @@
-//! Xmip's side: the four calls a Location makes, each one request with a
-//! bearer token over one connection.
+//! Xmip's side: the calls a Location and an archive make, each one request
+//! with a bearer token over one connection.
 //!
 //! The JSON API, because it is one HTTP call per operation and answers in
 //! a shape serde reads. Obtaining the token is outside this crate: a
 //! Location is configured with one — from a service account, a metadata
 //! server, or an operator — and hands it on as `Authorization: Bearer`.
+//!
+//! A listing stamps each object with its `generation`, and a receive gets
+//! and deletes it on the condition `ifGenerationMatch` that it still lies
+//! in that generation: one written again or deleted since is answered
+//! `412` or `404` and nothing is done to it ([`AsListed::Changed`]). The
+//! generation and not the `etag`, on Google's advice: "You should
+//! generally use generation and metageneration preconditions instead of
+//! `ETag` preconditions" (Cloud Storage, *Request preconditions*,
+//! docs.cloud.google.com/storage/docs/request-preconditions, read
+//! 2026-11-19). An upload that must write over nothing carries
+//! `ifGenerationMatch=0`, which "only proceeds if no object with the
+//! specified name exists in the bucket" (the same page).
 
 use std::time::Duration;
 
 use serde_json::Value;
 use transport::error::{Result, protocol_error};
+use transport::listed::{AsListed, Object};
 
 use codec::percent::encode;
 use http::endpoint::{Connections, Offer};
@@ -56,14 +69,14 @@ impl Client {
         self
     }
 
-    /// The object names under `prefix` in `bucket`, each with its `etag`,
-    /// as many as one listing carries — a thousand — so a fuller prefix is
-    /// taken a thousand at a time.
+    /// The object names under `prefix` in `bucket`, each with its
+    /// `generation`, as many as one listing carries — a thousand — so a
+    /// fuller prefix is taken a thousand at a time.
     ///
     /// # Errors
     /// Where the endpoint refused, could not be reached, or did not answer
-    /// with a listing naming each object's `etag`.
-    pub fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<(String, String)>> {
+    /// with a listing naming each object's `generation`.
+    pub fn list(&self, bucket: &str, prefix: &str) -> Result<Vec<Object>> {
         let request = Request::new("GET", objects(bucket)).query("prefix", prefix);
         let listing: Value = serde_json::from_slice(&self.call(request)?.body)
             .map_err(|e| protocol_error(format!("a listing that is not JSON: {e}")))?;
@@ -78,54 +91,109 @@ impl Client {
                         protocol_error(format!("a listed object without its {field}"))
                     })
                 };
-                Ok((named("name")?, named("etag")?))
+                Ok((named("name")?, named("generation")?))
             })
             .collect()
     }
 
-    /// The object `name` in `bucket`.
+    /// The object `name` in `bucket` as listed, in `generation`.
     ///
     /// # Errors
-    /// Where there is no such object, or the endpoint refused or could not
-    /// be reached.
-    pub fn get(&self, bucket: &str, name: &str) -> Result<Vec<u8>> {
+    /// Where the endpoint refused for another reason or could not be
+    /// reached.
+    pub fn get(&self, bucket: &str, name: &str, generation: &str) -> Result<AsListed<Vec<u8>>> {
         let request = Request::new("GET", object(bucket, name)).query("alt", "media");
-        Ok(self.call(request)?.body)
+        self.as_listed(request, generation, |answer| answer.body)
     }
 
-    /// Upload `bytes` as the object `name` in `bucket`, in one piece.
+    /// Delete the object `name` in `bucket` as listed, in `generation`.
+    ///
+    /// # Errors
+    /// Where the endpoint refused for another reason or could not be
+    /// reached.
+    pub fn delete(&self, bucket: &str, name: &str, generation: &str) -> Result<AsListed<()>> {
+        let request = Request::new("DELETE", object(bucket, name));
+        self.as_listed(request, generation, |_| ())
+    }
+
+    /// The object `name` in `bucket` in whichever generation it lies, or
+    /// `None` where none does.
+    ///
+    /// # Errors
+    /// Where the endpoint refused for another reason or could not be
+    /// reached.
+    pub fn read(&self, bucket: &str, name: &str) -> Result<Option<Vec<u8>>> {
+        let request = Request::new("GET", object(bucket, name)).query("alt", "media");
+        let answer = self.exchange(request)?;
+        if answer.status == NOT_FOUND {
+            return Ok(None);
+        }
+        judge(answer).map(|answer| Some(answer.body))
+    }
+
+    /// Upload `bytes` as the object `name` in `bucket`, in one piece, over
+    /// whatever lies there.
     ///
     /// # Errors
     /// Where the endpoint refused or could not be reached.
     pub fn put(&self, bucket: &str, name: &str, bytes: &[u8]) -> Result<()> {
-        let request = Request::new("POST", format!("/upload{}", objects(bucket)))
-            .query("uploadType", "media")
-            .query("name", name)
-            .header("Content-Type", "application/octet-stream")
-            .body(bytes);
-        self.call(request).map(|_| ())
+        self.call(upload(bucket, name, bytes)).map(|_| ())
     }
 
-    /// Delete the object `name` in `bucket`.
+    /// Upload `bytes` as the object `name` in `bucket` only where no object
+    /// lies under the name: `true` where it was written, `false` where one
+    /// lay there and nothing was written.
     ///
     /// # Errors
-    /// Where there is no such object, or the endpoint refused or could not
-    /// be reached.
-    pub fn delete(&self, bucket: &str, name: &str) -> Result<()> {
-        self.call(Request::new("DELETE", object(bucket, name)))
-            .map(|_| ())
+    /// Where the endpoint refused for another reason or could not be
+    /// reached.
+    pub fn put_new(&self, bucket: &str, name: &str, bytes: &[u8]) -> Result<bool> {
+        let answer = self.exchange(upload(bucket, name, bytes).query(IF_GENERATION_MATCH, "0"))?;
+        if answer.status == PRECONDITION_FAILED {
+            return Ok(false);
+        }
+        judge(answer).map(|_| true)
+    }
+
+    /// `request` made on the condition that its object lies in
+    /// `generation`: what `held` makes of the answer, or
+    /// [`AsListed::Changed`] where it lies in another (`412`) or not at all
+    /// (`404`).
+    fn as_listed<T>(
+        &self,
+        request: Request,
+        generation: &str,
+        held: impl FnOnce(Response) -> T,
+    ) -> Result<AsListed<T>> {
+        let answer = self.exchange(request.query(IF_GENERATION_MATCH, generation))?;
+        if matches!(answer.status, PRECONDITION_FAILED | NOT_FOUND) {
+            return Ok(AsListed::Changed);
+        }
+        judge(answer).map(|answer| AsListed::Held(held(answer)))
     }
 
     fn call(&self, request: Request) -> Result<Response> {
+        judge(self.exchange(request)?)
+    }
+
+    /// The answer to `request`, whatever its status.
+    fn exchange(&self, request: Request) -> Result<Response> {
         let request = request
             .header("Host", &self.endpoint.authority())
             .header("Authorization", &format!("Bearer {}", self.token));
-        let answer =
-            self.connections
-                .exchange(&self.endpoint, self.timeout, Offer::Http11, &request)?;
-        judge(answer)
+        self.connections
+            .exchange(&self.endpoint, self.timeout, Offer::Http11, &request)
     }
 }
+
+/// The condition a request carries on the generation its object lies in.
+const IF_GENERATION_MATCH: &str = "ifGenerationMatch";
+
+/// The answer to a request whose object is not there.
+const NOT_FOUND: u16 = 404;
+
+/// The answer to a request whose condition does not hold.
+const PRECONDITION_FAILED: u16 = 412;
 
 fn objects(bucket: &str) -> String {
     format!("/storage/v1/b/{}/o", encode(bucket, false))
@@ -133,6 +201,15 @@ fn objects(bucket: &str) -> String {
 
 fn object(bucket: &str, name: &str) -> String {
     format!("{}/{}", objects(bucket), encode(name, false))
+}
+
+/// The media upload of `bytes` as the object `name` in `bucket`.
+fn upload(bucket: &str, name: &str, bytes: &[u8]) -> Request {
+    Request::new("POST", format!("/upload{}", objects(bucket)))
+        .query("uploadType", "media")
+        .query("name", name)
+        .header("Content-Type", "application/octet-stream")
+        .body(bytes)
 }
 
 /// A 2xx answer as it is; anything else as a failure naming the status and
@@ -155,14 +232,16 @@ mod tests {
     use super::*;
     use crate::session::{Event, Session};
     use std::assert_matches;
-    use transport::socket;
+    use std::thread::JoinHandle;
+    use transport::{Taken, socket};
 
-    #[test]
-    fn the_four_calls_reach_a_session_and_come_back_shaped_as_the_json_api_shapes_them() {
+    /// A session answering `requests` from a client presenting its token,
+    /// and the client.
+    fn both_ends(requests: usize) -> (Client, JoinHandle<(Session, Vec<Event>)>) {
         let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
         let far_end = std::thread::spawn(move || {
             let mut session = Session::new("ya29.token").timing_out_after(Duration::from_secs(2));
-            let events: Vec<Event> = (0..6)
+            let events: Vec<Event> = (0..requests)
                 .map(|_| session.serve_one(&listener).expect("served"))
                 .collect();
             (session, events)
@@ -170,18 +249,32 @@ mod tests {
         let client = Client::new(&format!("http://{address}"), "ya29.token")
             .expect("endpoint")
             .timing_out_after(Duration::from_secs(2));
+        (client, far_end)
+    }
+
+    /// What `answer` held, or `None` where the object changed.
+    fn held<T>(answer: AsListed<T>) -> Option<T> {
+        match answer {
+            AsListed::Held(held) => Some(held),
+            AsListed::Changed => None,
+        }
+    }
+
+    #[test]
+    fn the_calls_reach_a_session_and_come_back_shaped_as_the_json_api_shapes_them() {
+        let (client, far_end) = both_ends(6);
         client.put("orders", "in/a b.edi", b"UNA").expect("put");
         client.put("orders", "out/c.edi", b"UNB").expect("put");
         assert_eq!(
             client.list("orders", "in/").expect("list"),
             vec![("in/a b.edi".to_string(), "1".to_string())],
-            "the first object written"
+            "the first object written, in its generation"
         );
-        assert_eq!(client.get("orders", "in/a b.edi").expect("get"), b"UNA");
-        client.delete("orders", "in/a b.edi").expect("delete");
-        let missing = client.get("orders", "in/a b.edi").expect_err("gone");
-        assert!(missing.message.contains("404 No such object"), "{missing}");
-        assert!(!missing.retryable);
+        let got = client.get("orders", "in/a b.edi", "1").expect("get");
+        assert_eq!(held(got), Some(b"UNA".to_vec()));
+        let deleted = client.delete("orders", "in/a b.edi", "1").expect("delete");
+        assert_eq!(held(deleted), Some(()));
+        assert_eq!(client.read("orders", "in/a b.edi").expect("read"), None);
         let (session, events) = far_end.join().expect("thread");
         assert_eq!(session.objects().len(), 1);
         assert_matches!(&events[2], Event::Listed { prefix, .. } if prefix == "in/");
@@ -189,6 +282,55 @@ mod tests {
         assert_eq!(events[3], Event::Retrieved(origin.clone()));
         assert_eq!(events[4], Event::Deleted(origin));
         assert_eq!(events[5], Event::Refused("notFound".to_string()));
+    }
+
+    #[test]
+    fn a_condition_not_met_or_an_object_gone_is_changed_and_one_already_there_exists() {
+        let (client, far_end) = both_ends(9);
+        client.put("orders", "in/a", b"one").expect("generation 1");
+        assert!(
+            !client.put_new("orders", "in/a", b"two").expect("412"),
+            "exists"
+        );
+        assert!(
+            client
+                .put_new("orders", "in/b", b"new")
+                .expect("generation 2")
+        );
+        assert!(held(client.get("orders", "in/a", "2").expect("412")).is_none());
+        assert!(held(client.get("orders", "in/none", "1").expect("404")).is_none());
+        assert!(held(client.delete("orders", "in/a", "2").expect("412")).is_none());
+        assert!(held(client.delete("orders", "in/none", "1").expect("404")).is_none());
+        assert_eq!(
+            client.read("orders", "in/a").expect("read"),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            held(client.delete("orders", "in/b", "2").expect("ok")),
+            Some(())
+        );
+        let (session, events) = far_end.join().expect("thread");
+        let not_met = Event::Refused("conditionNotMet".to_string());
+        let not_found = Event::Refused("notFound".to_string());
+        assert_eq!(
+            events[1..7],
+            [
+                not_met.clone(),
+                Event::Stored(Taken::new(
+                    "google-cloud-storage://orders/in/b",
+                    b"new".to_vec()
+                )),
+                not_met.clone(),
+                not_found.clone(),
+                not_met,
+                not_found
+            ]
+        );
+        assert_eq!(
+            session.objects().keys().collect::<Vec<_>>(),
+            ["orders/in/a"],
+            "nothing written over, nothing deleted that changed"
+        );
     }
 
     #[test]
