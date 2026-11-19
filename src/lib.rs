@@ -7,27 +7,27 @@
 //! Google Cloud, and its JSON API is four calls on a bucket: list under a
 //! prefix, get as media, upload as media, delete. A Receive Location lists
 //! a prefix, gets each object as the runtime first reads it, and deletes it
-//! once the runtime accepts it after the whole receive cycle — one refused
-//! stays where it lies and is not received again while its `etag` is
-//! unchanged, one whose cycle failed stays for the next receive; a Send
-//! Location uploads a Stream as an object. Both present a bearer token over plain
-//! HTTP/1.1 on a socket — `https://` with the `tls` feature, which is the
-//! http technology's TLS (ADR-0033). Obtaining the token is outside: a
-//! Location is configured with it.
+//! once the runtime accepts it after the whole receive cycle, each in the
+//! `generation` its listing gave it — one written again or deleted since is
+//! neither read nor deleted, and the next listing takes it as a new
+//! arrival; one refused stays where it lies and is not received again
+//! while its generation is unchanged, one whose cycle failed stays for the
+//! next receive; a Send Location uploads a Stream as an object. Both
+//! present a bearer token over plain HTTP/1.1 on a socket — `https://` with
+//! the `tls` feature, which is the http technology's TLS (ADR-0033).
+//! Obtaining the token is outside: a Location is configured with it.
 //!
 //! ```text
-//! client.rs    Xmip's side: list, get, put, delete, JSON read by serde
+//! client.rs    Xmip's side: list, get, delete, read, put, put_new; serde JSON
 //! session.rs   the far end a test or the essentials runs on loopback
 //! ```
 //!
 //! The endpoint, HTTP itself and the judgment of an answer come from the
-//! http technology, the percent-encoding from `net`, the flat XML scan from
-//! the capability (ADR-0044).
+//! http technology, the percent-encoding from `net`, the receive from the
+//! capability (ADR-0044).
 //!
-//! Cloud Storage has objects and a precondition this transport does not
-//! yet use, so [`Transport::claims`] answers [`NoNativeClaim`], ADR-0024
-//! clause 5. The native claim the record names — a generation precondition
-//! — is a later step.
+//! Cloud Storage has no lock or lease a receive takes, so
+//! [`Transport::claims`] answers [`NoNativeClaim`], ADR-0024 clause 5.
 //!
 //! The origin URI is the object under the scheme that is the technology's
 //! name: `google-cloud-storage://bucket/in/order-1.edi`. A send target is
@@ -70,7 +70,7 @@ pub struct GcsTransport {
     /// makes.
     connections: Connections,
     /// The objects this Location refused and left in the bucket, each with
-    /// its `etag`; a clone shares them.
+    /// its `generation`; a clone shares them.
     refused: transport::Refused<String, String>,
 }
 
@@ -160,13 +160,13 @@ impl Transport for GcsTransport {
     /// one object-store receive: the receive gets and deletes nothing, each
     /// object's `GET` is made when the runtime first reads its body — whole,
     /// `net::http` reads a `GET` body whole — and its acknowledgement
-    /// deletes it on [`transport::Verdict::Accepted`] only. On
-    /// [`transport::Verdict::Refused`] it is left where it lies and this
-    /// Location does not receive it again while its `etag` is unchanged —
-    /// one written again is a new arrival; the memory is the node
-    /// process's, so a node started again receives it once more. On
-    /// [`transport::Verdict::Failed`] it is left for the next receive to
-    /// list and get again.
+    /// deletes it on [`transport::Verdict::Accepted`] only, both in the
+    /// generation listed. On [`transport::Verdict::Refused`] it is left
+    /// where it lies and this Location does not receive it again while its
+    /// generation is unchanged — one written again is a new arrival; the
+    /// memory is the node process's, so a node started again receives it
+    /// once more. On [`transport::Verdict::Failed`] it is left for the next
+    /// receive to list and get again.
     fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         let client = Arc::new(self.client()?);
         let (getting, deleting) = (Arc::clone(&client), Arc::clone(&client));
@@ -180,8 +180,8 @@ impl Transport for GcsTransport {
             most,
             &self.refused,
             |name| origin(bucket, name),
-            move |name| getting.get(&getting_from, name),
-            move |name| deleting.delete(&deleting_from, name),
+            move |name, generation| getting.get(&getting_from, name, generation),
+            move |name, generation| deleting.delete(&deleting_from, name, generation),
         )
     }
 
@@ -319,6 +319,7 @@ impl Loopback for GcsTransport {
 mod tests {
     use super::*;
     use std::assert_matches;
+    use std::io::Read;
     use std::thread::JoinHandle;
     use transport::Taken;
     use xcore::settings::Given;
@@ -464,8 +465,61 @@ mod tests {
             .remove(0)
             .taken()
             .expect("ok");
-        assert_eq!(again.bytes, b"second", "another etag, a new arrival");
+        assert_eq!(again.bytes, b"second", "another generation, a new arrival");
         let (session, _) = far_end.join().expect("thread");
+        assert!(session.objects().is_empty(), "accepted, so deleted");
+    }
+
+    #[test]
+    fn a_replacement_between_read_and_acceptance_stays_for_the_next_listing() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let near = node(&format!("http://{address}"), "ya29.token");
+        // An upload; a list, a get; an upload over it; the delete of the
+        // generation listed; a list, a get, a delete.
+        let far_end = serve(near.session(), listener, 8);
+        near.send("in/1.edi", b"first").expect("upload");
+        let listed = near.receive().expect("listed").remove(0);
+        let (_, mut body, told) = listed.into_parts();
+        let mut read = Vec::new();
+        body.read_to_end(&mut read).expect("read");
+        assert_eq!(read, b"first");
+        near.send("in/1.edi", b"second").expect("written over it");
+        told.acknowledge(transport::Verdict::Accepted)
+            .expect("what was accepted is done with");
+        let again = near.receive().expect("listed again");
+        assert_eq!(again.len(), 1, "the replacement is a new arrival");
+        let again = again.into_iter().next().expect("one").taken().expect("ok");
+        assert_eq!(again.bytes, b"second");
+        let (session, events) = far_end.join().expect("thread");
+        assert_eq!(
+            events[4],
+            Event::Refused("conditionNotMet".to_string()),
+            "the delete names the generation listed, so the replacement stays"
+        );
+        assert!(session.objects().is_empty(), "the replacement accepted too");
+    }
+
+    #[test]
+    fn a_replacement_between_listing_and_first_read_is_not_read_under_the_old_stamp() {
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let near = node(&format!("http://{address}"), "ya29.token");
+        // An upload; a list; an upload over it; the get of the generation
+        // listed; a list, a get, a delete.
+        let far_end = serve(near.session(), listener, 7);
+        near.send("in/1.edi", b"first").expect("upload");
+        let listed = near.receive().expect("listed").remove(0);
+        near.send("in/1.edi", b"second").expect("written over it");
+        let failure = listed.taken().expect_err("not read under the old stamp");
+        assert!(
+            failure.message.contains("changed since it was listed"),
+            "{failure}"
+        );
+        let again = near.receive().expect("listed again");
+        assert_eq!(again.len(), 1, "left by the failed cycle");
+        let again = again.into_iter().next().expect("one").taken().expect("ok");
+        assert_eq!(again.bytes, b"second", "read under its own stamp");
+        let (session, events) = far_end.join().expect("thread");
+        assert_eq!(events[3], Event::Refused("conditionNotMet".to_string()));
         assert!(session.objects().is_empty(), "accepted, so deleted");
     }
 
