@@ -14,9 +14,10 @@
 //! generally use generation and metageneration preconditions instead of
 //! `ETag` preconditions" (Cloud Storage, *Request preconditions*,
 //! docs.cloud.google.com/storage/docs/request-preconditions, read
-//! 2026-11-19). An upload that must write over nothing carries
-//! `ifGenerationMatch=0`, which "only proceeds if no object with the
-//! specified name exists in the bucket" (the same page).
+//! 2026-11-19). An upload that must write over nothing — a receive's
+//! claim, an archive's object — carries `ifGenerationMatch=0`, which "only
+//! proceeds if no object with the specified name exists in the bucket"
+//! (the same page).
 
 use std::time::Duration;
 
@@ -141,18 +142,24 @@ impl Client {
     }
 
     /// Upload `bytes` as the object `name` in `bucket` only where no object
-    /// lies under the name: `true` where it was written, `false` where one
-    /// lay there and nothing was written.
+    /// lies under the name: the `generation` it was written in, which the
+    /// object resource the upload answers names, or `None` where one lay
+    /// there and nothing was written.
     ///
     /// # Errors
     /// Where the endpoint refused for another reason or could not be
-    /// reached.
-    pub fn put_new(&self, bucket: &str, name: &str, bytes: &[u8]) -> Result<bool> {
+    /// reached, or answered no object resource naming its `generation`.
+    pub fn put_new(&self, bucket: &str, name: &str, bytes: &[u8]) -> Result<Option<String>> {
         let answer = self.exchange(upload(bucket, name, bytes).query(IF_GENERATION_MATCH, "0"))?;
         if answer.status == PRECONDITION_FAILED {
-            return Ok(false);
+            return Ok(None);
         }
-        judge(answer).map(|_| true)
+        let resource: Value = serde_json::from_slice(&judge(answer)?.body)
+            .map_err(|e| protocol_error(format!("an upload answered with no JSON: {e}")))?;
+        let generation = resource["generation"].as_str().map(str::to_string);
+        generation
+            .map(Some)
+            .ok_or_else(|| protocol_error("an uploaded object without its generation"))
     }
 
     /// `request` made on the condition that its object lies in
@@ -288,15 +295,10 @@ mod tests {
     fn a_condition_not_met_or_an_object_gone_is_changed_and_one_already_there_exists() {
         let (client, far_end) = both_ends(9);
         client.put("orders", "in/a", b"one").expect("generation 1");
-        assert!(
-            !client.put_new("orders", "in/a", b"two").expect("412"),
-            "exists"
-        );
-        assert!(
-            client
-                .put_new("orders", "in/b", b"new")
-                .expect("generation 2")
-        );
+        let there = client.put_new("orders", "in/a", b"two").expect("412");
+        assert_eq!(there, None, "exists");
+        let written = client.put_new("orders", "in/b", b"new").expect("written");
+        assert_eq!(written.as_deref(), Some("2"), "its generation");
         assert!(held(client.get("orders", "in/a", "2").expect("412")).is_none());
         assert!(held(client.get("orders", "in/none", "1").expect("404")).is_none());
         assert!(held(client.delete("orders", "in/a", "2").expect("412")).is_none());
