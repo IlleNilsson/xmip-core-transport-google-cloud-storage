@@ -20,7 +20,7 @@
 //! ```text
 //! client.rs    Xmip's side: list, get, delete, read, put, put_new; serde JSON
 //! bucket.rs    the bucket as the capability's receive and claim reach it
-//! session.rs   the far end a test or the essentials runs on loopback
+//! session.rs   the far end a test or the System Tests run on loopback
 //! ```
 //!
 //! The endpoint, HTTP itself and the judgment of an answer come from the
@@ -129,7 +129,7 @@ impl GcsTransport {
     }
 
     /// A far end that expects this transport's token, for a test or the
-    /// essentials to run on loopback.
+    /// System Tests to run on loopback.
     #[must_use]
     pub fn session(&self) -> Session {
         let session = Session::new(&self.token);
@@ -630,8 +630,8 @@ mod tests {
         assert_eq!(pair.ceiling(), None);
     }
 
-    /// The Essentials' edge payloads, written here so the crate does not
-    /// depend on it.
+    /// The System Tests' edge payloads, written here so the crate does not
+    /// depend on them.
     fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
         vec![
             ("empty", Vec::new()),
