@@ -14,8 +14,11 @@
 //! while its generation is unchanged, one whose cycle failed stays for the
 //! next receive; a Send Location uploads a Stream as an object. Both
 //! present a bearer token over plain HTTP/1.1 on a socket — `https://` with
-//! the `tls` feature, which is the http technology's TLS (ADR-0033).
-//! Obtaining the token is outside: a Location is configured with it.
+//! the `tls` feature, which is the http technology's TLS (ADR-0033). The
+//! token is the Location's secret, `secret = "<name>"`, a `password` the
+//! Administration Database keeps, read at each request (ADR-0019,
+//! amendment 2026-10-29; ADR-0015, amendment 2026-11-25). Obtaining it is
+//! outside: a token Google issues expires within the hour, and is set again.
 //!
 //! ```text
 //! client.rs    Xmip's side: list, get, delete, read, put, put_new; serde JSON
@@ -82,6 +85,10 @@ pub struct GcsTransport {
     /// The claims this Location makes, and the objects it refused and left
     /// in the bucket, each with its `generation`; a clone shares them.
     claims: Claims,
+    /// The secret the Location names, the bearer token, read at each
+    /// request (ADR-0019, amendment 2026-10-29; ADR-0015, amendment
+    /// 2026-11-25); `token` where it names none.
+    secret: Option<transport::Secured>,
 }
 
 impl GcsTransport {
@@ -98,6 +105,7 @@ impl GcsTransport {
             timeout: None,
             connections: Connections::new(),
             claims: Claims::new(Claimant::process()),
+            secret: None,
         }
     }
 
@@ -115,12 +123,15 @@ impl GcsTransport {
         self
     }
 
-    /// The client this transport speaks through.
+    /// The client this transport speaks through, presenting the token the
+    /// Location's secret holds, read now, or the one it was built with.
     ///
     /// # Errors
-    /// Where the endpoint is not an HTTP URL.
+    /// Where the endpoint is not an HTTP URL, or the secret is not set,
+    /// cannot be read or is no password.
     pub fn client(&self) -> Result<Client> {
-        let client = Client::new(&self.endpoint, &self.token)?;
+        let token = transport::secured::presented(self.secret.as_ref(), &self.token, self.name())?;
+        let client = Client::new(&self.endpoint, &token)?;
         let client = client.sharing(self.connections.clone());
         Ok(match self.timeout {
             Some(timeout) => client.timing_out_after(timeout),
@@ -240,14 +251,22 @@ impl Configured for GcsTransport {
         Some(&mut self.timeout)
     }
 
-    /// The bearer token comes through the Location's credentials, never a
-    /// setting; the transport is built without it.
+    /// The bearer token is the Location's secret, never a setting
+    /// ([`Configured::secured_by`]); the transport is built without it.
     fn configured(address: &str, settings: &Read) -> Result<Self> {
         let mut transport = Self::new(address, settings.text("bucket"));
         if let Some(prefix) = settings.optional_text("prefix") {
             transport = transport.with_prefix(prefix);
         }
         Ok(transport)
+    }
+
+    /// The bearer token the Location's secret holds, presented with each
+    /// request a Receive or a Send Location makes, read as it is made. A
+    /// token names its own subject, so no setting names who presents it.
+    fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
+        self.secret = Some(secret);
+        Ok(self)
     }
 
     /// The connections its clients share, an HTTP/2 one's frames in a span
@@ -348,8 +367,8 @@ mod tests {
         assert_eq!(built.prefix, "in/");
         assert_eq!(built.timeout, Some(Duration::from_secs(10)));
         assert!(
-            built.token.is_empty(),
-            "the token is the Location's credentials"
+            built.token.is_empty() && built.secret.is_none(),
+            "the token is the Location's secret, which secured_by gives"
         );
         let Err(refused) = GcsTransport::open(endpoint, Applies::Send, &given[1..2]) else {
             panic!("bucket is required, and a Send Location has no prefix");
@@ -605,6 +624,32 @@ mod tests {
         assert!(!failure.retryable);
         let (_, events) = far_end.join().expect("thread");
         assert_eq!(events, vec![Event::Refused("authError".to_string())]);
+    }
+
+    /// A Location naming its secret presents the bearer token it holds,
+    /// read at each request; one not set yet fails the send, to be tried
+    /// again (ADR-0015, amendment 2026-11-25).
+    #[test]
+    fn a_location_presents_the_token_its_secret_holds() {
+        use transport::secured::Kept;
+        let drawn = Kept::drawn();
+        let (listener, address) = socket::bind_tcp("127.0.0.1:0").expect("bind");
+        let far_end = serve(node("http://x", &drawn).session(), listener, 1);
+        let given = [("bucket".to_string(), Given::Text("orders".to_string()))];
+        let location = format!("google-cloud-storage://http://{address}");
+        let kept = std::sync::Arc::new(Kept::default());
+        let near = GcsTransport::open(&location, Applies::Send, &given)
+            .expect("built")
+            .secured_by(kept.secured("partner-x.storage"))
+            .expect("a Location presents its token");
+        let unset = near.send("in/1.edi", b"x").expect_err("not set");
+        assert!(unset.retryable, "{unset}");
+        assert!(unset.message.contains("is not set"), "{unset}");
+        kept.set("partner-x.storage", xcore::SecretKind::Password, &drawn);
+        near.send("in/1.edi", b"UNA").expect("presented");
+        let (_, events) = far_end.join().expect("thread");
+        let stored = Taken::new(origin("orders", "in/1.edi"), b"UNA".to_vec());
+        assert_eq!(events, [Event::Stored(stored)]);
     }
 
     #[test]

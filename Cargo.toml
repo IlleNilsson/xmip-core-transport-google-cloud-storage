@@ -29,6 +29,11 @@ codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNil
 # The JSON API answers in JSON; this is the one engine for reading it.
 serde_json = "1"
 
+[dev-dependencies]
+# The secrets a test sets, from the capability's test support and never a
+# production build (ADR-0044).
+transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main", features = ["test-support"] }
+
 [features]
 default = []
 # HTTPS endpoints. Off by default, as it is in the http technology.
