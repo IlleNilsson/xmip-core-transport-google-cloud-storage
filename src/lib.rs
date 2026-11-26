@@ -44,34 +44,57 @@
 //! The origin URI is the object under the scheme that is the technology's
 //! name: `google-cloud-storage://bucket/in/order-1.edi`. A send target is
 //! the same form, or a name alone in this transport's bucket.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod bucket;
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod session;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use client::Client;
+#[cfg(feature = "default")]
 use http::endpoint::Connections;
+#[cfg(feature = "default")]
 use net::{Endpoint, Target};
+#[cfg(feature = "default")]
 pub use session::{Event, Session};
-use transport::claim::Claimant;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
-use transport::listed::Claims;
-use transport::listening::Listening;
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::socket;
-use transport::{ArrivalIdentity, NodeStart};
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, NodeStart, claim::Claimant, listed::Claims};
+#[cfg(feature = "default")]
 use transport::{Arrived, Configured, Directions, ResourceClaim, Transport};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use transport::{listening::Listening, socket};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
 /// What the loopback pair agrees on: one bucket, one object uploaded
 /// there, one bearer token the far end expects and the near end presents.
+#[cfg(feature = "default")]
 const LOOPBACK_BUCKET: &str = "probe";
+#[cfg(feature = "default")]
 const LOOPBACK_OBJECT: &str = "probe.bin";
+#[cfg(feature = "default")]
 const LOOPBACK_TOKEN: &str = "ya29.probe";
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct GcsTransport {
     endpoint: String,
@@ -91,6 +114,7 @@ pub struct GcsTransport {
     secret: Option<transport::Secured>,
 }
 
+#[cfg(feature = "default")]
 impl GcsTransport {
     /// Speak to the endpoint at `endpoint` — `http://host:port` or
     /// `https://host:port`, `https://storage.googleapis.com` in the cloud —
@@ -160,6 +184,7 @@ impl GcsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for GcsTransport {
     fn name(&self) -> &'static str {
         "google-cloud-storage"
@@ -213,39 +238,10 @@ impl Transport for GcsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for GcsTransport {
-    /// The address is the JSON API's endpoint, `https://storage.googleapis.com`
-    /// in the cloud.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "bucket",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The bucket a Location lists and gets from or uploads to.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "prefix",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "Only the objects whose names start with it are received; every \
-                          object when left out.",
-                applies: Applies::Receive,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long an endpoint that stops answering is waited on; unbounded \
-                 when left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this
-    /// technology: its name (ADR-0011, amendment 2026-11-19).
-    const SCHEMES: &'static [&'static str] = &["google-cloud-storage"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -291,11 +287,13 @@ impl Configured for GcsTransport {
 /// above: `google-cloud-storage://bucket/name`. The one place the form is
 /// written: the transport's receive, the session's answers and the
 /// google-cloud-storage archive's receipt all name an object by it.
+#[cfg(feature = "default")]
 #[must_use]
 pub fn origin(bucket: &str, name: &str) -> String {
     format!("google-cloud-storage://{bucket}/{name}")
 }
 
+#[cfg(feature = "default")]
 impl GcsTransport {
     /// Both ends on this machine: an ephemeral local port, one token the
     /// far end expects and the near end presents, the loopback timeout.
@@ -307,6 +305,7 @@ impl GcsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for GcsTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -351,7 +350,7 @@ mod tests {
     use std::io::Read;
     use std::thread::JoinHandle;
     use transport::Taken;
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     #[test]
     fn google_cloud_storage_declares_its_settings_and_reads_through_them() {
