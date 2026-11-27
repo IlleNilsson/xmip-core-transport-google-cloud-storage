@@ -34,21 +34,16 @@
 //! receive claims each object it hands over by uploading
 //! `<name>.xmip-claim` beside it with `ifGenerationMatch=0`, which "only
 //! proceeds if no object with the specified name exists in the bucket" —
-//! the capability's claim, written once (`transport::listed::Claims`). The
-//! claim holds the node's location and the time; it is deleted in the
-//! generation it was written in however the cycle ends, and a node that
-//! starts again deletes every claim its name still holds.
-//! [`Transport::claims`] answers the same claim for one object by its
-//! address.
+//! the capability's claim, written once (`transport::listed::Claims`),
+//! deleted in the generation it was written in. [`Transport::claims`]
+//! answers the same claim for one object by its address.
 //!
 //! The origin URI is the object under the scheme that is the technology's
 //! name: `google-cloud-storage://bucket/in/order-1.edi`. A send target is
 //! the same form, or a name alone in this transport's bucket.
 //!
 //! **Built with its `declaration` feature alone** the crate is
-//! [`declaration`], what a Location of it is configured with, and none of
-//! the code above, which is behind the default feature: what the surfaces'
-//! library carries (ADR-0064, amendment 2026-11-26).
+//! [`declaration`].
 
 #[cfg(feature = "default")]
 pub mod bucket;
@@ -202,21 +197,10 @@ impl Transport for GcsTransport {
         transport::Waiting::Polled("a receive lists the bucket and returns")
     }
 
-    /// Every object under the prefix that this node's claim wins, listed
-    /// by the capability's one object-store receive
-    /// ([`transport::listed::Claims::listed`]): each claimed by an upload
-    /// of its claim with `ifGenerationMatch=0`, one passed over where
-    /// another's claim lies. The receive gets and deletes nothing, each
-    /// object's `GET` is made when the runtime first reads its body — whole,
-    /// `net::http` reads a `GET` body whole — and its acknowledgement
-    /// deletes it on [`transport::Verdict::Accepted`] only, both in the
-    /// generation listed. On [`transport::Verdict::Refused`] it is left
-    /// where it lies and this Location does not receive it again while its
-    /// generation is unchanged — one written again is a new arrival; the
-    /// memory is the node process's, so a node started again receives it
-    /// once more. On [`transport::Verdict::Failed`] it is left for the next
-    /// receive to list and get again. Whatever the verdict, its claim is
-    /// deleted.
+    /// What [`transport::listed::Claims::listed`] wins under the prefix, each
+    /// object's claim uploaded with `ifGenerationMatch=0`, its get and its
+    /// delete in the generation listed; a `GET` body is read whole by
+    /// `net::http`.
     fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         self.claims.listed(&self.bucket()?, most)
     }
